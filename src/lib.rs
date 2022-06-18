@@ -40,7 +40,7 @@ fn compile_internal(dir: &str) -> Result<String> {
         let png_path = use_path(&mut out, entry.path().with_extension("png"))?;
 
         let desc: SpritesDesc = serde_yaml::from_reader(File::open(desc_path)?)?;
-        let bmp = decode24_file(png_path)?;
+        let bmp = decode32_file(png_path)?;
         builder.add(desc, bmp);
     }
 
@@ -74,11 +74,11 @@ struct Sprite {
 
 #[derive(Default)]
 struct SpritesBuilder {
-    sprites: HashMap<String, Bitmap<RGB<u8>>>,
+    sprites: HashMap<String, Bitmap<RGBA>>,
 }
 
 impl SpritesBuilder {
-    fn add(&mut self, sprites: SpritesDesc, bmp: Bitmap<RGB<u8>>) {
+    fn add(&mut self, sprites: SpritesDesc, bmp: Bitmap<RGBA>) {
         for (id, desc) in sprites.sprites {
             self.sprites.insert(id, extract_rect(&bmp, desc.rect));
         }
@@ -86,7 +86,7 @@ impl SpritesBuilder {
 
     fn compile(self) -> Result<CompiledSprites> {
         let mut compiled = CompiledSprites {
-            next_palette_index: Some(0),
+            next_palette_index: Some(1),
             palette: HashMap::new(),
             sprites: HashMap::new(),
         };
@@ -142,17 +142,22 @@ struct CompiledSprites {
 }
 
 impl CompiledSprites {
-    fn palette_index(&mut self, color: RGB<u8>) -> Result<u8> {
+    fn palette_index(&mut self, color: RGBA) -> Result<u8> {
         use std::collections::hash_map::Entry;
 
-        match (self.palette.entry(color), self.next_palette_index) {
+        if color.a == 0 {
+            return Ok(0);
+        }
+        assert_eq!(color.a, 255);
+
+        match (self.palette.entry(color.rgb()), self.next_palette_index) {
             (Entry::Occupied(o), _) => Ok(*o.get()),
             (Entry::Vacant(e), Some(i)) => {
                 self.next_palette_index = i.checked_add(1);
                 e.insert(i);
                 Ok(i)
             }
-            (Entry::Vacant(_), None) => Err("Found more than 256 colors".into()),
+            (Entry::Vacant(_), None) => Err("Too many colors to fit into single palette".into()),
         }
     }
 
