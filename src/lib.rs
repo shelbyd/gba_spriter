@@ -1,22 +1,63 @@
+// #![cfg_attr(not(feature = "std"), no_std)]
+
+use proc_macro::TokenStream;
+
+#[proc_macro]
+pub fn compile(input: TokenStream) -> TokenStream {
+    let in_dir = syn::parse_macro_input!(input as syn::LitStr);
+
+    match compile_internal(&in_dir.value()) {
+        Ok(s) => s.parse().unwrap(),
+        Err(e) => {
+            return proc_macro::TokenStream::from(
+                syn::Error::new(in_dir.span(), e).to_compile_error(),
+            );
+        }
+    }
+}
+
 use lodepng::*;
 use serde::Deserialize;
-use structopt::StructOpt;
 
-use std::{
-    collections::HashMap,
-    ffi::OsStr,
-    fs::File,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, ffi::OsStr, fmt::Write, fs::File, path::Path};
 
-#[derive(StructOpt, Debug)]
-struct Options {
-    /// Find assets in this directory, recursively.
-    assets_dir: PathBuf,
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-    /// Write compiled assets to this file.
-    out_file: PathBuf,
+fn compile_internal(dir: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut builder = SpritesBuilder::default();
+
+    for entry in walkdir::WalkDir::new(dir) {
+        let entry = entry?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if entry.path().extension() != Some(OsStr::new("yml")) {
+            continue;
+        }
+
+        let desc_path = use_path(&mut out, entry.path())?;
+        let png_path = use_path(&mut out, entry.path().with_extension("png"))?;
+
+        let desc: SpritesDesc = serde_yaml::from_reader(File::open(desc_path)?)?;
+        let bmp = decode24_file(png_path)?;
+        builder.add(desc, bmp);
+    }
+
+    let compiled = builder.compile()?;
+    compiled.write_to(&mut out)?;
+    Ok(out)
+}
+
+fn use_path<P: AsRef<Path>>(mut out: impl Write, p: P) -> std::result::Result<P, std::fmt::Error> {
+    // TODO(shelbyd): Import relative to actual root.
+    write!(
+        &mut out,
+        "const _: &[u8] = include_bytes!(\"../{}\");",
+        p.as_ref().display(),
+    )?;
+
+    Ok(p)
 }
 
 #[derive(Deserialize, Debug)]
@@ -29,33 +70,6 @@ struct SpritesDesc {
 #[serde(deny_unknown_fields)]
 struct Sprite {
     rect: (usize, usize, usize, usize),
-}
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-fn main() -> Result<()> {
-    let opts = Options::from_args();
-
-    let mut builder = SpritesBuilder::default();
-
-    for entry in walkdir::WalkDir::new(&opts.assets_dir) {
-        let entry = entry?;
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        if entry.path().extension() != Some(OsStr::new("yml")) {
-            continue;
-        }
-
-        let desc: SpritesDesc = serde_yaml::from_reader(File::open(entry.path())?)?;
-        let bmp = decode24_file(entry.path().with_extension("png"))?;
-        builder.add(desc, bmp);
-    }
-
-    let compiled = builder.compile()?;
-    compiled.write_to(&opts.out_file)?;
-
-    Ok(())
 }
 
 #[derive(Default)]
@@ -142,9 +156,8 @@ impl CompiledSprites {
         }
     }
 
-    fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
-        let mut file = File::create(path)?;
-        writeln!(file, "use ::gba::mmio_types::Color;\n")?;
+    fn write_to(&self, mut out: impl std::fmt::Write) -> Result<()> {
+        writeln!(out, "use ::gba::mmio_types::Color;\n")?;
 
         let mut unwritten_colors = self
             .palette
@@ -152,34 +165,34 @@ impl CompiledSprites {
             .map(|(&c, &i)| (i, c))
             .collect::<HashMap<_, _>>();
 
-        writeln!(file, "pub const PALETTE: &'static [Color] = &[")?;
+        writeln!(out, "pub const PALETTE: &'static [Color] = &[")?;
         for i in 0..=255 {
             if unwritten_colors.is_empty() {
                 break;
             }
             let c = unwritten_colors.remove(&i).unwrap_or(RGB::default());
             writeln!(
-                file,
+                out,
                 "    Color::from_rgb({}, {}, {}),",
                 c.r >> 3,
                 c.g >> 3,
                 c.b >> 3,
             )?;
         }
-        writeln!(file, "];\n")?;
+        writeln!(out, "];\n")?;
 
         for (id, tiles) in &self.sprites {
             writeln!(
-                file,
+                out,
                 "pub const {}: &'static [[u8; 64]] = &[",
                 id.to_uppercase()
             )?;
 
             for tile in tiles {
-                writeln!(file, "    {:?},", tile)?;
+                writeln!(out, "    {:?},", tile)?;
             }
 
-            writeln!(file, "];")?;
+            writeln!(out, "];")?;
         }
 
         Ok(())
